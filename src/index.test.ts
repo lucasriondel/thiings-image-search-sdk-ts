@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { searchThiingsImages } from "./index";
+import { requestThiingsIcon, searchThiingsImages } from "./index";
 
 const realFetch = globalThis.fetch;
 
 function mockFetch(body: unknown, status = 200) {
-  const fn = mock(async (_url: string | URL | Request) =>
+  const fn = mock(async (_url: string | URL | Request, _init?: RequestInit) =>
     new Response(JSON.stringify(body), { status })
   );
   globalThis.fetch = fn as unknown as typeof fetch;
@@ -82,6 +82,55 @@ describe("searchThiingsImages", () => {
     const { fileId: _, ...noFile } = tomato;
     mockFetch({ result: { data: { json: [noFile] } } });
     expect(searchThiingsImages("tomato")).rejects.toThrow(/unexpected/i);
+  });
+});
+
+describe("requestThiingsIcon", () => {
+  test("posts a batched suggestion.create call", async () => {
+    const fn = mockFetch([{ result: { data: { json: null } } }]);
+
+    await requestThiingsIcon({
+      name: " Curry (spice) ",
+      email: "me@example.com",
+      note: "like turmeric, but for curry",
+    });
+
+    const [url, init] = fn.mock.calls[0]!;
+    expect(String(url)).toBe(
+      "https://www.thiings.co/api/trpc/suggestion.create?batch=1"
+    );
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      0: {
+        json: {
+          name: "Curry (spice)",
+          email: "me@example.com",
+          note: "like turmeric, but for curry",
+        },
+      },
+    });
+  });
+
+  test("omits a blank note", async () => {
+    const fn = mockFetch([{ result: { data: { json: null } } }]);
+    await requestThiingsIcon({ name: "Curry", email: "me@example.com", note: " " });
+    expect(JSON.parse(String(fn.mock.calls[0]![1]?.body))).toEqual({
+      0: { json: { name: "Curry", email: "me@example.com" } },
+    });
+  });
+
+  test("rejects missing name or email without fetching", async () => {
+    const fn = mockFetch({});
+    expect(requestThiingsIcon({ name: " ", email: "a@b.c" })).rejects.toThrow(/name/);
+    expect(requestThiingsIcon({ name: "Curry", email: "" })).rejects.toThrow(/email/);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  test("surfaces the tRPC error message", async () => {
+    mockFetch([{ error: { json: { message: "Invalid email" } } }], 400);
+    expect(
+      requestThiingsIcon({ name: "Curry", email: "nope" })
+    ).rejects.toThrow(/400 \(Invalid email\)/);
   });
 });
 

@@ -91,3 +91,62 @@ export async function searchThiingsImages(
     .slice(0, limit)
     .map(toImage);
 }
+
+const SUGGEST_URL =
+  "https://www.thiings.co/api/trpc/suggestion.create?batch=1";
+
+export interface ThiingsIconRequest {
+  /** Name of the thing you'd like an icon for, e.g. "Curry (spice)". */
+  name: string;
+  /** Contact email thiings.co may use to follow up. */
+  email: string;
+  /** Optional free-form details, e.g. a reference link or description. */
+  note?: string;
+}
+
+/**
+ * Ask thiings.co to create a new icon.
+ *
+ * Submits the same suggestion form as the "request a thing" UI on the site.
+ * This sends a real request to the thiings.co team — don't call it in a loop.
+ *
+ * @throws If the request is invalid or the API responds with an error
+ */
+export async function requestThiingsIcon(
+  request: ThiingsIconRequest
+): Promise<void> {
+  const name = request.name?.trim();
+  const email = request.email?.trim();
+  if (!name) throw new Error("name is required");
+  if (!email) throw new Error("email is required");
+
+  const json: Record<string, string> = { name, email };
+  const note = request.note?.trim();
+  if (note) json.note = note;
+
+  const res = await fetch(SUGGEST_URL, {
+    method: "POST",
+    headers: {
+      "User-Agent": USER_AGENT,
+      "Content-Type": "application/json",
+      Origin: "https://www.thiings.co",
+      "x-trpc-source": "nextjs-react",
+    },
+    body: JSON.stringify({ 0: { json } }),
+  });
+
+  if (!res.ok) {
+    const message = await res
+      .json()
+      .then(
+        (body) =>
+          (body as { error?: { json?: { message?: unknown } } }[])?.[0]?.error
+            ?.json?.message
+      )
+      .catch(() => undefined);
+    throw new Error(
+      `Failed to request thiings.co icon: ${res.status}` +
+        (typeof message === "string" ? ` (${message})` : "")
+    );
+  }
+}
