@@ -120,9 +120,8 @@ export async function requestThiingsIcon(
   if (!name) throw new Error("name is required");
   if (!email) throw new Error("email is required");
 
-  const json: Record<string, string> = { name, email };
-  const note = request.note?.trim();
-  if (note) json.note = note;
+  // thiings.co's schema requires `note` to be present, even if empty.
+  const json = { name, email, note: request.note?.trim() ?? "" };
 
   const res = await fetch(SUGGEST_URL, {
     method: "POST",
