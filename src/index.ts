@@ -1,136 +1,93 @@
-import * as cheerio from "cheerio";
-
 export interface ThiingsImage {
   id: string;
   name: string;
+  /** Full-size PNG (~1.4 MB), served with permissive CORS. */
   imageUrl: string;
+  /** 1000px PNG via thiings.co's Next.js image resizer (~80 KB). */
+  thumbnailUrl: string;
+  categories: string[];
+  shareUrl: string;
 }
 
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
 
+// Undocumented internal tRPC endpoint used by the thiings.co site.
+const SEARCH_URL = "https://www.thiings.co/api/trpc/object.searchItems";
+const BLOB_BASE = "https://lftz25oez4aqbxpq.public.blob.vercel-storage.com";
+
 interface RawThing {
   id: string;
   name: string;
-  fileId?: string;
+  fileId: string;
+  categories?: string[];
   shareUrl?: string;
 }
 
-function parseThingsFromHtml(html: string): RawThing[] {
-  let things: RawThing[] = [];
-
-  // Pattern 1: __NEXT_DATA__ (old Next.js format)
-  const nextDataMatch = html.match(
-    /<script id="__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s
+function isRawThing(value: unknown): value is RawThing {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.id === "string" &&
+    typeof v.name === "string" &&
+    typeof v.fileId === "string" &&
+    (v.categories === undefined ||
+      (Array.isArray(v.categories) &&
+        v.categories.every((c) => typeof c === "string"))) &&
+    (v.shareUrl === undefined || typeof v.shareUrl === "string")
   );
+}
 
-  if (nextDataMatch) {
-    const nextData = JSON.parse(nextDataMatch[1]);
-    things =
-      nextData?.props?.pageProps?.things ||
-      nextData?.props?.pageProps?.results ||
-      [];
-  } else {
-    // Pattern 2: Next.js RSC streaming format via self.__next_f.push()
-    const nextFMatches = html.matchAll(
-      /self\.__next_f\.push\(\[([0-9]+),"([^"]*(?:\\.[^"]*)*)"\]\)/g
+function extractThings(body: unknown): RawThing[] {
+  const items = (body as { result?: { data?: { json?: unknown } } })?.result
+    ?.data?.json;
+  if (!Array.isArray(items) || !items.every(isRawThing)) {
+    throw new Error(
+      "Unexpected response shape from thiings.co search API; the endpoint may have changed"
     );
-
-    for (const match of nextFMatches) {
-      try {
-        const dataStr = match[2];
-        if (dataStr.includes('\\"objects\\"')) {
-          const objMatches = dataStr.matchAll(
-            /\{\\"id\\":\\"([^\\]+)\\",\\"name\\":\\"([^\\]+)\\"[^}]*\\"fileId\\":\\"([^\\]+)\\"[^}]*\\"shareUrl\\":\\"([^\\]+)\\"[^}]*\}/g
-          );
-          for (const objMatch of objMatches) {
-            const [_, id, name, fileId, shareUrl] = objMatch;
-            things.push({
-              id,
-              name,
-              fileId,
-              shareUrl: shareUrl.replace(/\\\//g, "/"),
-            });
-          }
-        }
-      } catch {
-        // skip malformed entries
-      }
-    }
-
-    // Deduplicate
-    const seenIds = new Set<string>();
-    things = things.filter((thing) => {
-      if (seenIds.has(thing.id)) return false;
-      seenIds.add(thing.id);
-      return true;
-    });
   }
-
-  return things;
+  return items;
 }
 
-function filterByQuery(things: RawThing[], query: string): RawThing[] {
-  const searchLower = query.toLowerCase().trim();
-  return things.filter((thing) => {
-    const nameLower = thing.name.toLowerCase();
-    const idLower = thing.id.toLowerCase();
-    return nameLower.includes(searchLower) || idLower.includes(searchLower);
-  });
-}
-
-async function fetchOgImage(thing: RawThing): Promise<ThiingsImage | null> {
-  const thingUrl =
-    thing.shareUrl || `https://www.thiings.co/things/${thing.id}`;
-  try {
-    const res = await fetch(thingUrl, {
-      headers: { "User-Agent": USER_AGENT },
-    });
-    if (!res.ok) return null;
-
-    const html = await res.text();
-    const $ = cheerio.load(html);
-    const imageUrl = $('meta[property="og:image"]').attr("content");
-    if (!imageUrl) return null;
-
-    return { id: thing.id, name: thing.name, imageUrl };
-  } catch {
-    return null;
-  }
+function toImage(thing: RawThing): ThiingsImage {
+  const imageUrl = `${BLOB_BASE}/image-${thing.fileId}.png`;
+  return {
+    id: thing.id,
+    name: thing.name,
+    imageUrl,
+    thumbnailUrl: `https://www.thiings.co/_next/image?url=${encodeURIComponent(imageUrl)}&w=1000&q=75`,
+    categories: thing.categories ?? [],
+    shareUrl: thing.shareUrl ?? `https://www.thiings.co/things/${thing.id}`,
+  };
 }
 
 /**
  * Search thiings.co for images matching the given text.
  *
+ * Matching is done server-side and may include related things
+ * (e.g. "tomato" also returns "Ketchup"). Queries of 2 characters or
+ * fewer return no results.
+ *
  * @param searchText - The search query
  * @param limit - Maximum number of results (default: 12)
- * @returns Array of matching images with id, name, and imageUrl
+ * @returns Array of matching images
+ * @throws If the API responds with an error or an unexpected shape
  */
 export async function searchThiingsImages(
   searchText: string,
   limit = 12
 ): Promise<ThiingsImage[]> {
-  if (!searchText || searchText.trim() === "") {
-    return [];
+  const query = searchText?.trim();
+  if (!query) return [];
+
+  const url = `${SEARCH_URL}?input=${encodeURIComponent(JSON.stringify({ json: { query } }))}`;
+  const res = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+
+  if (!res.ok) {
+    throw new Error(`Failed to search thiings.co: ${res.status}`);
   }
 
-  const searchUrl = `https://www.thiings.co/things?q=${encodeURIComponent(searchText)}`;
-  const searchRes = await fetch(searchUrl, {
-    headers: { "User-Agent": USER_AGENT },
-  });
-
-  if (!searchRes.ok) {
-    throw new Error(`Failed to fetch from thiings.co: ${searchRes.status}`);
-  }
-
-  const html = await searchRes.text();
-  let things = parseThingsFromHtml(html);
-  things = filterByQuery(things, searchText);
-
-  if (things.length === 0) return [];
-
-  const limited = things.slice(0, limit);
-  const results = await Promise.all(limited.map(fetchOgImage));
-
-  return results.filter((r): r is ThiingsImage => r !== null);
+  return extractThings(await res.json())
+    .slice(0, limit)
+    .map(toImage);
 }
